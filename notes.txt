@@ -1,0 +1,10 @@
+The files that make up the csem compiler are listed below:
+
+  parse.c   -- parser that matches our grammar.
+  sym.c     -- symbol table
+  semutil.c -- utility routines for IR generation (variable declarations)
+  sem.cpp   -- IR generation for each semantic routine.
+
+parse.c makes calls into sym.c, semutil.c, sem.cpp to implement the
+syntax-directed definition.
+

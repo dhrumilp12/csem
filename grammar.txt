@@ -1,0 +1,121 @@
+prog    -> externs
+externs -> externs extern
+        |  epsilon
+
+extern  -> dcl ';'
+        |  func
+
+dcls    -> dcls dcl ';'
+        |  epsilon
+
+dcl     -> type dclr             { return dcl($2, $1, 0);                  }
+        |  dcl ',' dclr          { return dcl($3, $1->i_type&~T_ARRAY, 0); }
+
+dclr    -> ID                    { return dclr($1, 0, 1);         }
+        |  ID '[' ']'            { return dclr($1, T_ARRAY, 1);   }
+        |  ID '[' CON ']'        { return dclr($1, T_ARRAY, $3);  }
+
+type    -> CHAR                  { return T_INT;    }
+        |  FLOAT                 { return T_DOUBLE; }
+        |  DOUBLE                { return T_DOUBLE; }
+        |  INT                   { return T_INT;    }
+
+func    -> fhead stmts '}'	     { ftail();                 }
+
+fhead   -> fname fargs '{' dcls  { fhead($1);               }
+
+fname   -> type ID               { return fname($1, $2);    }
+        |  ID                    { return fname(T_INT, $1); }
+
+fargs   -> '(' ')'               { enterblock();            }
+        |  '(' args ')'          { enterblock();            }
+
+args    -> type dclr             { dcl($2, $1, PARAM);      }
+        |  args ',' type dclr    { dcl($4, $3, PARAM);      }
+
+m       ->                       { return m();              }
+n       ->                       { return n();              }
+block   -> '{' stmts '}'
+
+stmts   -> stmts lblstmt
+	    |  epsilon
+
+lblstmt	-> b stmt
+	    |  b labels stmt
+
+labels  -> ID ':'                { labeldcl($1);            }
+	    |  labels ID ':'         { labeldcl($2);            }
+
+stmt    -> expr ';'
+        |  IF '(' cexpr ')' m lblstmt m
+             { doif($3, $5, $7); }
+        |  IF '(' cexpr ')' m lblstmt ELSE n m lblstmt m
+             { doifelse($3, $5, $8, $9, $11); }
+        |  WHILE '(' m cexpr ')' m s lblstmt n m
+             { dowhile($3, $4, $6, $9, $10); }
+        |  DO m s lblstmt WHILE '(' m cexpr ')' ';' m
+             { dodo($2, $7, $8, $11); }
+        |  FOR '(' expro ';' m cexpro ';' m expro n ')' m s lblstmt n m
+             { dofor($5, $6, $8, $10, $12, $15, $16); }
+	    |  CONTINUE ';'       { docontinue(); }
+	    |  BREAK ';'          { dobreak(); }
+	    |  GOTO ID ';'        { dogoto($2); }
+        |  RETURN ';'         { doret((struct sem_rec *) NULL); }
+        |  RETURN expr ';'    { doret($2); }
+	    | block
+        | ';'
+
+cexpro  -> cexpr
+        |  epsilon { return node(NULL, NULL, 0, NULL, n(), NULL); }
+
+cexpr   -> expr EQ expr          { return rel((const char*) "==", $1, $3); }
+        |  expr NE expr          { return rel((const char*) "!=", $1, $3); }
+        |  expr LE expr          { return rel((const char*) "<=", $1, $3); }
+        |  expr GE expr          { return rel((const char*) ">=", $1, $3); }
+        |  expr LT expr          { return rel((const char*) "<",  $1, $3); }
+        |  expr GT expr          { return rel((const char*) ">",  $1, $3); }
+        |  cexpr AND m cexpr     { return ccand($1, $3, $4); }
+        |  cexpr OR m cexpr      { return ccor($1, $3, $4); }
+        |  NOT cexpr             { return ccnot($2); }
+        |  expr                  { return ccexpr($1); }
+        |  '(' cexpr ')'         { return $2; }
+
+exprs   -> expr                  { return $1; }
+        |  exprs ',' expr        { return exprs($1, $3); }
+
+expro   -> expr
+        |  epsilon
+
+expr    -> lval ASSIGN expr          { return assign((const char*) "",   $1, $3); }
+        |  lval ASSIGN_OR expr       { return assign((const char*) "|",  $1, $3); }
+        |  lval ASSIGN_XOR expr      { return assign((const char*) "^",  $1, $3); }
+        |  lval ASSIGN_AND expr      { return assign((const char*) "&",  $1, $3); }
+        |  lval ASSIGN_LSH expr      { return assign((const char*) "<<", $1, $3); }
+        |  lval ASSIGN_RSH expr      { return assign((const char*) ">>", $1, $3); }
+        |  lval ASSIGN_ADD expr      { return assign((const char*) "+",  $1, $3); }
+        |  lval ASSIGN_SUB expr      { return assign((const char*) "-",  $1, $3); }
+        |  lval ASSIGN_MUL expr      { return assign((const char*) "*",  $1, $3); }
+        |  lval ASSIGN_DIV expr      { return assign((const char*) "/",  $1, $3); }
+        |  lval ASSIGN_MOD expr      { return assign((const char*) "%",  $1, $3); }
+        |  expr BIT_OR expr          { return opb((const char*) "|",  $1, $3); }
+        |  expr BIT_XOR expr         { return opb((const char*) "^",  $1, $3); }
+        |  expr BIT_AND expr         { return opb((const char*) "&",  $1, $3); }
+        |  expr LSH expr             { return opb((const char*) "<<", $1, $3); }
+        |  expr RSH expr             { return opb((const char*) ">>", $1, $3); }
+        |  expr ADD expr             { return op2((const char*) "+",  $1, $3); }
+        |  expr SUB expr             { return op2((const char*) "-",  $1, $3); }
+        |  expr MUL expr             { return op2((const char*) "*",  $1, $3); }
+        |  expr DIV expr             { return op2((const char*) "/",  $1, $3); }
+        |  expr MOD expr             { return op2((const char*) "%",  $1, $3); }
+        |  BIT_AND lval              { return $2; }
+        |  SUB expr                  { return op1((const char*) "-",      $2); }
+        |  BIT_NOT expr              { return op1((const char*) "~",      $2); }
+        |  lval                      { return op1((const char*) "@",      $1); }
+        |  ID '(' ')'                { return call($1, (struct sem_rec *) NULL); }
+        |  ID '(' exprs ')'          { return call($1, $3); }
+        |  '(' expr ')'              { return $2; }
+        |  CON                       { return con($1); }
+        |  STR                       { return genstring($1); }
+
+lval	-> ID                        { return id($1); }
+	    |  ID '[' expr ']'           { return indx(id($1), $3); }
