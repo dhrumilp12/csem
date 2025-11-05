@@ -262,6 +262,21 @@ static std::pair<Value*,int> do_bit_binop(const char* op, Value* L, int Lt, Valu
     fprintf(stderr,"unknown bitwise op %s\n", op); exit(1);
 }
 
+// Map compound assignment tokens ("+=", "|=", "<<=", …) to the underlying op.
+static const char* normalize_compound_op(const char* op) {
+    if (!op || !op[0]) return op;
+    if (!strcmp(op, "+="))  return "+";
+    if (!strcmp(op, "-="))  return "-";
+    if (!strcmp(op, "*="))  return "*";
+    if (!strcmp(op, "/="))  return "/";
+    if (!strcmp(op, "%="))  return "%";
+    if (!strcmp(op, "|="))  return "|";
+    if (!strcmp(op, "^="))  return "^";
+    if (!strcmp(op, "&="))  return "&";
+    if (!strcmp(op, "<<=")) return "<<";
+    if (!strcmp(op, ">>=")) return ">>";
+    return op; // already a bare op
+}
 
 /*
  * backpatch - set temporary labels in the sem_rec to real labels
@@ -467,10 +482,11 @@ struct sem_rec* con(long long x)
  * LLVM API calls:
  * None
  */
-void dobreak()
-{
-    fprintf(stderr, "sem: dobreak not implemented\n");
-    return;
+void dobreak() {
+    if (!looptop) { yyerror("break not in loop"); return; }
+    // create an unconditional branch to a tmp label and record it as a break
+    struct sem_rec* br = n();
+    looptop->breaks = merge(looptop->breaks, br);
 }
 
 /*
@@ -482,10 +498,11 @@ void dobreak()
  * LLVM API calls:
  * None
  */
-void docontinue()
-{
-    fprintf(stderr, "sem: docontinue not implemented\n");
-    return;
+void docontinue() {
+    if (!looptop) { yyerror("continue not in loop"); return; }
+    // unconditional branch; will be patched to the loop's continue target
+    struct sem_rec* br = n();
+    looptop->conts = merge(looptop->conts, br);
 }
 
 /*
@@ -515,9 +532,30 @@ void dodo(void* m1, void* m2, struct sem_rec* cond, void* m3)
 void dofor(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n1, void* m3,
            struct sem_rec* n2, void* m4)
 {
-    fprintf(stderr, "sem: dofor not implemented\n");
-    return;
+    // If condition exists: true → body (m3), false → exit (m4)
+    if (cond) {
+        backpatch(cond->s_true,  m3);
+        backpatch(cond->s_false, m4);
+    } else {
+        // for(;;) – no condition means always-true; parser should already ensure flow to m3
+        // Nothing to backpatch here.
+    }
+
+    // From end of body, jump to increment (m2)
+    backpatch(n2, m2);
+
+    // From end of increment, jump to test header (m1)
+    backpatch(n1, m1);
+
+    // continue goes to increment; break goes after loop
+    if (looptop) {
+        backpatch(looptop->conts, m2);
+        backpatch(looptop->breaks, m4);
+        looptop->conts  = nullptr;
+        looptop->breaks = nullptr;
+    }
 }
+
 
 /*
  * dogoto - goto statement
@@ -563,9 +601,15 @@ void doif(struct sem_rec* cond, void* m1, void* m2) {
 void doifelse(struct sem_rec* cond, void* m1, struct sem_rec* n,
               void* m2, void* m3)
 {
-    fprintf(stderr, "sem: doifelse not implemented\n");
-    return;
+    // cond true  -> then block at m1
+    // cond false -> else block at m2
+    // the 'n' after the THEN part is an unconditional jump that must skip the ELSE
+    // and land at m3 (the join/after-else).
+    backpatch(cond->s_true,  m1);
+    backpatch(cond->s_false, m2);
+    backpatch(n,             m3);
 }
+
 
 /*
  * doret - return statement
@@ -615,8 +659,21 @@ void doret(struct sem_rec* e) {
 void dowhile(void* m1, struct sem_rec* cond, void* m2,
              struct sem_rec* n, void* m3)
 {
-    fprintf(stderr, "sem: dowhile not implemented\n");
-    return;
+    // cond true → body (m2), cond false → after loop (m3)
+    backpatch(cond->s_true,  m2);
+    backpatch(cond->s_false, m3);
+
+    // body’s trailing “n” jumps back to the test header (m1)
+    backpatch(n, m1);
+
+    // continue jumps go to test header; breaks go after the loop
+    if (looptop) {
+        backpatch(looptop->conts, m1);
+        backpatch(looptop->breaks, m3);
+        // clear for safety (parser usually ends the scope separately)
+        looptop->conts  = nullptr;
+        looptop->breaks = nullptr;
+    }
 }
 
 /*
@@ -809,13 +866,13 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
     }
     // Case 2: global
     else if (auto *gv = llvm::dyn_cast<GlobalVariable>(base)) {
-        Type* gvTy = gv->getValueType(); // the pointee type of the global
-        if (gvTy->isArrayTy()) {
-            Value* zero = ConstantInt::get(get_llvm_type(T_INT), 0);
-            gep = Builder.CreateGEP(gvTy, base, ArrayRef<Value*>{zero, idx});
-        } else {
-            gep = Builder.CreateGEP(gvTy, base, ArrayRef<Value*>{idx});
-        }
+        Type* gvTy   = gv->getValueType(); // [N x T] or T
+        Type* elemTy = gvTy->isArrayTy()
+                    ? gvTy->getArrayElementType()
+                    : gvTy;
+
+        // Single-index GEP using the element type
+        gep = Builder.CreateGEP(elemTy, base, ArrayRef<Value*>{idx});
     }
     // Case 3: generic pointer (e.g., param). Use semantic type to provide element type.
     else {
@@ -1007,26 +1064,35 @@ struct sem_rec* rel(const char* op, struct sem_rec* x, struct sem_rec* y) {
     int Lt = x->s_type, Rt = y->s_type;
     unify(L, Lt, R, Rt);
 
+    // normalize a few aliases some parsers produce
+    bool is_eq = (strcmp(op,"==")==0) || (strcmp(op,"=")==0);
+    bool is_ne = (strcmp(op,"!=")==0) || (strcmp(op,"<>")==0);
+    bool is_le = (strcmp(op,"<=")==0);
+    bool is_ge = (strcmp(op,">=")==0);
+    bool is_lt = (strcmp(op,"<" )==0);
+    bool is_gt = (strcmp(op,">" )==0);
+
     Value* cmp = nullptr;
     if (isDoubleTy(Lt)) {
-        if (strcmp(op,"==")==0) cmp = Builder.CreateFCmpOEQ(L,R);
-        else if (strcmp(op,"!=")==0) cmp = Builder.CreateFCmpONE(L,R);
-        else if (strcmp(op,"<=")==0) cmp = Builder.CreateFCmpOLE(L,R);
-        else if (strcmp(op,">=")==0) cmp = Builder.CreateFCmpOGE(L,R);
-        else if (strcmp(op,"<")==0)  cmp = Builder.CreateFCmpOLT(L,R);
-        else if (strcmp(op,">")==0)  cmp = Builder.CreateFCmpOGT(L,R);
-        else { fprintf(stderr,"bad rel op\n"); exit(1);}
+        if (is_eq)      cmp = Builder.CreateFCmpOEQ(L,R);
+        else if (is_ne) cmp = Builder.CreateFCmpONE(L,R);
+        else if (is_le) cmp = Builder.CreateFCmpOLE(L,R);
+        else if (is_ge) cmp = Builder.CreateFCmpOGE(L,R);
+        else if (is_lt) cmp = Builder.CreateFCmpOLT(L,R);
+        else if (is_gt) cmp = Builder.CreateFCmpOGT(L,R);
     } else {
-        if (strcmp(op,"==")==0) cmp = Builder.CreateICmpEQ(L,R);
-        else if (strcmp(op,"!=")==0) cmp = Builder.CreateICmpNE(L,R);
-        else if (strcmp(op,"<=")==0) cmp = Builder.CreateICmpSLE(L,R);
-        else if (strcmp(op,">=")==0) cmp = Builder.CreateICmpSGE(L,R);
-        else if (strcmp(op,"<")==0)  cmp = Builder.CreateICmpSLT(L,R);
-        else if (strcmp(op,">")==0)  cmp = Builder.CreateICmpSGT(L,R);
-        else { fprintf(stderr,"bad rel op\n"); exit(1);}
+        if (is_eq)      cmp = Builder.CreateICmpEQ(L,R);
+        else if (is_ne) cmp = Builder.CreateICmpNE(L,R);
+        else if (is_le) cmp = Builder.CreateICmpSLE(L,R);
+        else if (is_ge) cmp = Builder.CreateICmpSGE(L,R);
+        else if (is_lt) cmp = Builder.CreateICmpSLT(L,R);
+        else if (is_gt) cmp = Builder.CreateICmpSGT(L,R);
     }
+    if (!cmp) { fprintf(stderr,"bad rel op: %s\n", op); exit(1); }
+
     return make_cond(cmp);
 }
+
 
 
 /*
@@ -1076,30 +1142,32 @@ struct sem_rec* assign(const char* op, struct sem_rec* x, struct sem_rec* y)
 {
     if (!(x->s_type & T_ADDR)) { fprintf(stderr,"assign: lhs not lvalue\n"); exit(1); }
 
-    // Load current LHS value if compound op (+= etc.)
     Value* lhs_ptr = (Value*) x->s_value;
     int    lhs_t   = x->s_type & ~(T_ADDR | T_ARRAY);
     Type*  lhs_ty  = get_llvm_type(lhs_t);
 
     y = as_rvalue(y);
-    Value* rhs = (Value*) y->s_value;
+    Value* rhs   = (Value*) y->s_value;
     int    rhs_t = y->s_type;
 
     Value* store_val = nullptr;
 
     if (op[0] == '\0') {
-        // Simple "=": cast RHS to LHS type then store
+        // Simple assignment
         if (lhs_t != (rhs_t & ~(T_ADDR|T_ARRAY))) rhs = cast_value(rhs, rhs_t, lhs_t);
         store_val = rhs;
     } else {
-        // Compound assign: (old_lhs <op> rhs) then cast to lhs type and store
+        // Compound assignment
+        const char* bop = normalize_compound_op(op);
         Value* oldv = Builder.CreateLoad(lhs_ty, lhs_ptr);
+
         std::pair<Value*,int> r;
-        if (!strcmp(op,"|") || !strcmp(op,"^") || !strcmp(op,"&") ||
-            !strcmp(op,"<<")|| !strcmp(op,">>"))
-            r = do_bit_binop(op, oldv, lhs_t, rhs, rhs_t);
-        else
-            r = do_arith_binop(op, oldv, lhs_t, rhs, rhs_t);
+        if (!strcmp(bop,"|") || !strcmp(bop,"^") || !strcmp(bop,"&") ||
+            !strcmp(bop,"<<")|| !strcmp(bop,">>")) {
+            r = do_bit_binop(bop, oldv, lhs_t, rhs, rhs_t);
+        } else {
+            r = do_arith_binop(bop, oldv, lhs_t, rhs, rhs_t);
+        }
 
         Value* comb = r.first;
         if ((r.second & ~(T_ADDR|T_ARRAY)) != lhs_t) comb = cast_value(comb, r.second, lhs_t);
@@ -1107,9 +1175,9 @@ struct sem_rec* assign(const char* op, struct sem_rec* x, struct sem_rec* y)
     }
 
     Builder.CreateStore(store_val, lhs_ptr);
-    // The value of the assignment is the stored rvalue
     return s_node((void*)store_val, lhs_t);
 }
+
 
 
 /*
