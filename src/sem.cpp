@@ -1,3 +1,13 @@
+/*
+sources:
+
+I used sem_with_input1.cpp
+
+I used an AI assistant (ChatGPT):
+- I took help in labeldcl() - label declaration function. When I was getting different label than ref's output for input8.
+- I reviewed/validated all outputs and wrote the final implementation.
+
+*/
 #include <stdio.h>
 
 extern "C" {
@@ -138,13 +148,12 @@ std::string new_label()
     return ("L" + std::to_string(label_index++));
 }
 
-// Put this version near the top (and remove/replace the old one)
 static BasicBlock* create_tmp_label() {
     Function* F = Builder.GetInsertBlock()->getParent();
     std::string name = "tmplbl_T" + std::to_string(tmp_label_index++);
     // unique-ish temp name helps debugging; any string is fine
     BasicBlock* BB = BasicBlock::Create(TheContext, name, F);
-    // Make the block valid even if never patched to (we'll overwrite successor via backpatch)
+    // Make the block valid even if never patched to: add an unreachable instruction.
     IRBuilder<> TmpB(BB);
     TmpB.CreateUnreachable();
     return BB;
@@ -180,6 +189,7 @@ Type* get_llvm_type(int type)
 /*
  * HELPER UTILITY FUNCTIONS
  */
+
 static void prune_temp_blocks(llvm::Function* F) {
     std::vector<llvm::BasicBlock*> dead;
     for (auto &BB : *F) {
@@ -235,20 +245,17 @@ static struct sem_rec* make_cond(Value* i1_cond) {
     BasicBlock* Fbb = create_tmp_label();
     BranchInst* br  = Builder.CreateCondBr(i1_cond, Tbb, Fbb);
 
-    // We’ll return a sem_rec whose true/false lists each contain exactly one node:
     // s_value = the branch, s_bb = the successor placeholder we want to replace later.
     struct sem_rec* tnode = node((void*)br, (void*)Tbb, 0, NULL, NULL, NULL);
     struct sem_rec* fnode = node((void*)br, (void*)Fbb, 0, NULL, NULL, NULL);
     struct sem_rec* root  = node(NULL, NULL, 0, NULL, tnode, fnode);
 
-    // We’re still in the old block; no terminator needed — br is the terminator.
     return root;
 }
 
 // Return a pair: (Value*, resulting-internal-type) for arithmetic ops +,-,*,/,%
 static std::pair<Value*,int> do_arith_binop(const char* op, Value* L, int Lt, Value* R, int Rt) {
     // Promote to double if either side is double (C usual arithmetic conversions)
-    // (We already have cast_value, unify helpers.)
     Value* LL = L; Value* RR = R; int LT = Lt; int RT = Rt;
     unify(LL, LT, RR, RT);
 
@@ -325,7 +332,6 @@ void backpatch(struct sem_rec* p, void* bb_v) {
     }
 }
 
-
 /*
  * Global allocations. Globals are initialized to 0.
  */
@@ -391,7 +397,6 @@ struct sem_rec* call(char* fname, struct sem_rec* args)
     return s_node((void*)ret, rt);
 }
 
-
 /*
  * ccand - logical and
  *
@@ -431,7 +436,6 @@ struct sem_rec* ccexpr(struct sem_rec* e) {
     }
     return make_cond(cond);
 }
-
 
 /*
  * ccnot - logical not
@@ -554,6 +558,7 @@ void dodo(void* m1, void* m2, struct sem_rec* cond, void* m3)
         looptop->breaks = nullptr;
     }
 }
+
 /*
  * dofor - for statement
  *
@@ -586,7 +591,6 @@ void dofor(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n1, void* m
     }
 }
 
-
 /*
  * dogoto - goto statement
  *
@@ -616,8 +620,6 @@ void dogoto(char* id)
     gotos[numgotos++] = { sid, br };
 }
 
-
-
 /*
  * doif - one-arm if statement
  *
@@ -632,7 +634,6 @@ void doif(struct sem_rec* cond, void* m1, void* m2) {
     backpatch(cond->s_true,  m1);  // then
     backpatch(cond->s_false, m2);  // fall-through (after)
 }
-
 
 /*
  * doifelse - if then else statement
@@ -689,7 +690,6 @@ void doret(struct sem_rec* e) {
     Builder.CreateRet(v);
 }
 
-
 /*
  * dowhile - while statement
  *
@@ -737,7 +737,6 @@ struct sem_rec* exprs(struct sem_rec* l, struct sem_rec* e)
     p->s_link = e;
     return l;
 }
-
 
 /*
  * fhead - beginning of function body
@@ -857,7 +856,6 @@ void ftail()
     leaveblock();
 }
 
-
 /*
  * id - variable reference
  *
@@ -880,7 +878,6 @@ struct sem_rec* id(char* x) {
     // e->i_value is Alloca* (locals/params) or GlobalVariable* (globals)
     return s_node((void*) e->i_value, e->i_type | T_ADDR);
 }
-
 
 /*
  * indx - subscript
@@ -932,7 +929,6 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
     int elem_t = (x->s_type & ~(T_ADDR|T_ARRAY)); // base scalar type
     return s_node((void*)gep, elem_t | T_ADDR);
 }
-
 
 /*
  * labeldcl - process a label declaration
@@ -986,7 +982,6 @@ void labeldcl(const char* id)
     }
 }
 
-
 /*
  * m - generate label and return next temporary number
  *
@@ -1015,7 +1010,6 @@ void* m() {
     return (void*) next;
 }
 
-
 /*
  * n - generate goto and return backpatch pointer
  *
@@ -1029,7 +1023,6 @@ struct sem_rec* n() {
     return node((void*)br, (void*)tgt, 0, NULL, NULL, NULL);
 }
 
-
 /*
  * op1 - unary operators
  *
@@ -1042,7 +1035,9 @@ struct sem_rec* n() {
 struct sem_rec* op1(const char* op, struct sem_rec* y) {
     if (strcmp(op, "@") == 0) {
         // load from lvalue
-        if (!(y->s_type & T_ADDR)) { fprintf(stderr, "load requires lvalue\n"); exit(1); }
+        if (!(y->s_type & T_ADDR)) { 
+            fprintf(stderr, "load requires lvalue\n"); exit(1); 
+        }
         Type* ty = pointee_llvm_type(y->s_type);
         Value* v  = Builder.CreateLoad(ty, (Value*) y->s_value);
         return s_node((void*) v, y->s_type & ~T_ADDR);
@@ -1061,7 +1056,6 @@ struct sem_rec* op1(const char* op, struct sem_rec* y) {
 
     fprintf(stderr, "unhandled op1 %s\n", op); exit(1);
 }
-
 
 /*
  * op2 - arithmetic operators
@@ -1144,7 +1138,7 @@ struct sem_rec* rel(const char* op, struct sem_rec* x, struct sem_rec* y) {
 
     // normalize a few aliases some parsers produce
     bool is_eq = (strcmp(op,"==")==0) || (strcmp(op,"=")==0);
-    bool is_ne = (strcmp(op,"!=")==0) || (strcmp(op,"<>")==0);
+    bool is_ne = (strcmp(op,"!=")==0) || (strcmp(op,"<>")==0) || (strcmp(op,"!")==0);
     bool is_le = (strcmp(op,"<=")==0);
     bool is_ge = (strcmp(op,">=")==0);
     bool is_lt = (strcmp(op,"<" )==0);
@@ -1188,7 +1182,6 @@ struct sem_rec* cast(struct sem_rec* y, int t) {
     Value* cv = cast_value(v, from, t);
     return s_node((void*)cv, (t & ~(T_ARRAY|T_ADDR)));
 }
-
 
 /*
  * assign - assignment operators
