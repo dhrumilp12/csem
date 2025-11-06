@@ -22,6 +22,7 @@ extern "C" {
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/IR/Instructions.h"
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,7 @@ std::unique_ptr<T> make_unique(Args&&... args)
 }
 
 static int label_index = 0;
+static int tmp_label_index = 0;
 int relexpr = 0;
 
 struct loopscope {
@@ -136,14 +138,20 @@ std::string new_label()
     return ("L" + std::to_string(label_index++));
 }
 
-BasicBlock*
-create_tmp_label()
-{
-    return BasicBlock::Create(TheContext);
+// Put this version near the top (and remove/replace the old one)
+static BasicBlock* create_tmp_label() {
+    Function* F = Builder.GetInsertBlock()->getParent();
+    std::string name = "tmplbl_T" + std::to_string(tmp_label_index++);
+    // unique-ish temp name helps debugging; any string is fine
+    BasicBlock* BB = BasicBlock::Create(TheContext, name, F);
+    // Make the block valid even if never patched to (we'll overwrite successor via backpatch)
+    IRBuilder<> TmpB(BB);
+    TmpB.CreateUnreachable();
+    return BB;
 }
 
-BasicBlock*
-create_named_label(std::string label)
+
+BasicBlock* create_named_label(std::string label)
 {
     Function* curr_func = Builder.GetInsertBlock()->getParent();
     BasicBlock* new_block = BasicBlock::Create(TheContext, label, curr_func);
@@ -172,6 +180,21 @@ Type* get_llvm_type(int type)
 /*
  * HELPER UTILITY FUNCTIONS
  */
+static void prune_temp_blocks(llvm::Function* F) {
+    std::vector<llvm::BasicBlock*> dead;
+    for (auto &BB : *F) {
+        // Keep it super-conservative: only erase blocks that have no users
+        // and whose *only* instruction is 'unreachable'.
+        if (BB.use_empty() && BB.size() == 1 &&
+            llvm::isa<llvm::UnreachableInst>(BB.getTerminator())) {
+            dead.push_back(&BB);
+        }
+    }
+    for (auto *BB : dead) {
+        BB->eraseFromParent();
+    }
+}
+
 static Type* pointee_llvm_type(int t) {
     return get_llvm_type(t & ~(T_ARRAY | T_ADDR));
 }
@@ -203,8 +226,6 @@ static void unify(Value*& L, int& Lt, Value*& R, int& Rt) {
     if (isDoubleTy(Lt) || isDoubleTy(Rt)) {
         if (!isDoubleTy(Lt)) L = cast_value(L, Lt, T_DOUBLE), Lt = T_DOUBLE;
         if (!isDoubleTy(Rt)) R = cast_value(R, Rt, T_DOUBLE), Rt = T_DOUBLE;
-    } else {
-        // keep both ints
     }
 }
 
@@ -577,17 +598,24 @@ void dofor(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n1, void* m
  */
 void dogoto(char* id)
 {
-    // Create a temporary successor to satisfy IR constraints now.
+    const char* sid = slookup(id);
+
+    // If we've already seen this label, jump to it directly.
+    for (int i = 0; i < numlabelids; ++i) {
+        if (strcmp(labels[i].id, sid) == 0) {
+            Builder.CreateBr(labels[i].bb);
+            return;
+        }
+    }
+
+    // Otherwise, create a temp target and record for backpatching later.
     BasicBlock* tmp = create_tmp_label();
     BranchInst* br  = Builder.CreateBr(tmp);
 
     if (numgotos >= MAXGOTOS) { yyerror("too many gotos"); return; }
-    gotos[numgotos++] = { slookup(id), br };
-
-    // Make subsequent straight-line code land in a fresh (unreachable) block.
-    BasicBlock* dead = create_named_label(new_label());
-    Builder.SetInsertPoint(dead);
+    gotos[numgotos++] = { sid, br };
 }
+
 
 
 /*
@@ -817,10 +845,18 @@ struct id_entry* fname(int t, char* id)
  */
 void ftail()
 {
+    // prune temps in the current function
+    if (auto *IB = Builder.GetInsertBlock()) {
+        if (auto *F = IB->getParent()) {
+            prune_temp_blocks(F);
+        }
+    }
+
     numgotos = 0;
     numlabelids = 0;
     leaveblock();
 }
+
 
 /*
  * id - variable reference
@@ -869,7 +905,7 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
     Value* base = (Value*) x->s_value;
     Value* gep  = nullptr;
 
-    // Case 1: alloca
+    // Case 1: alloca (locals/params lowered as T with optional array size)
     if (auto *alloca = llvm::dyn_cast<AllocaInst>(base)) {
         Type* allocTy = alloca->getAllocatedType();
         if (allocTy->isArrayTy()) {
@@ -879,26 +915,24 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
             gep = Builder.CreateGEP(allocTy, base, ArrayRef<Value*>{idx});
         }
     }
-    // Case 2: global
-    else if (auto *gv = llvm::dyn_cast<GlobalVariable>(base)) {
-        Type* gvTy   = gv->getValueType(); // [N x T] or T
-        Type* elemTy = gvTy->isArrayTy()
-                    ? gvTy->getArrayElementType()
-                    : gvTy;
-
-        // Single-index GEP using the element type
+    // Case 2: global (true array needs TWO indices: 0, idx)
+    else if (llvm::isa<GlobalVariable>(base)) {
+        // Single-index form: getelementptr double, ptr @m, i32 idx
+        Type* elemTy = pointee_llvm_type(x->s_type); // double for m[]
         gep = Builder.CreateGEP(elemTy, base, ArrayRef<Value*>{idx});
     }
-    // Case 3: generic pointer (e.g., param). Use semantic type to provide element type.
+
+
+    // Case 3: generic pointer (e.g., decay/param as T*)
     else {
-        Type* elemTy = pointee_llvm_type(x->s_type); // from your internal type system
-        // Treat as pointer-to-element and step by idx
+        Type* elemTy = pointee_llvm_type(x->s_type);
         gep = Builder.CreateGEP(elemTy, base, ArrayRef<Value*>{idx});
     }
 
     int elem_t = (x->s_type & ~(T_ADDR|T_ARRAY)); // base scalar type
     return s_node((void*)gep, elem_t | T_ADDR);
 }
+
 
 /*
  * labeldcl - process a label declaration
@@ -920,10 +954,8 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
  */
 void labeldcl(const char* id)
 {
-    // If current block isn't terminated, branch to label block (we'll know it soon)
     BasicBlock* curr = Builder.GetInsertBlock();
 
-    // Find or create the label BB entry
     int idx = -1;
     for (int i = 0; i < numlabelids; ++i) {
         if (strcmp(labels[i].id, id) == 0) { idx = i; break; }
@@ -931,29 +963,29 @@ void labeldcl(const char* id)
     if (idx == -1) {
         if (numlabelids >= MAXLABELS) { yyerror("too many labels"); return; }
         labels[numlabelids].id = slookup(id);
-        labels[numlabelids].bb = create_named_label(labels[numlabelids].id);
+        // *** change: give user labels the "userlbl_" prefix ***
+        std::string uname = std::string("userlbl_") + id;
+        labels[numlabelids].bb = BasicBlock::Create(
+            TheContext, uname, Builder.GetInsertBlock()->getParent());
         idx = numlabelids++;
     }
     BasicBlock* L = labels[idx].bb;
 
-    // If current block has no terminator, branch into label
     if (!curr->getTerminator()) {
         Builder.CreateBr(L);
     }
-
-    // Start emitting at the label block
     Builder.SetInsertPoint(L);
 
-    // Patch all gotos targeting this label
+    // patch gotos ...
     for (int g = 0; g < numgotos; ++g) {
         if (gotos[g].id && strcmp(gotos[g].id, id) == 0 && gotos[g].branch) {
             gotos[g].branch->setSuccessor(0, L);
-            // mark as resolved
             gotos[g].id = nullptr;
             gotos[g].branch = nullptr;
         }
     }
 }
+
 
 /*
  * m - generate label and return next temporary number
@@ -1274,6 +1306,8 @@ void declare_print()
 void init_IR()
 {
     TheModule = make_unique<Module>("<stdin>", TheContext);
+    label_index = 0;        // <— add
+    tmp_label_index = 0;    // <— add
     declare_print();
 }
 
