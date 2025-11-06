@@ -51,6 +51,7 @@ using llvm::BranchInst;
 using llvm::Constant;
 using llvm::ConstantAggregateZero;
 using llvm::ConstantInt;
+using llvm::ConstantFP;
 using llvm::Function;
 using llvm::FunctionType;
 using llvm::GlobalValue;
@@ -314,11 +315,16 @@ void global_alloc(struct id_entry* p, int width) {
     Constant* init;
 
     if (p->i_type & T_ARRAY) {
-        type = ArrayType::get(get_llvm_type(p->i_type), width);
+        Type* elemTy = get_llvm_type(p->i_type & ~T_ARRAY);
+        type = ArrayType::get(elemTy, width);
         init = ConstantAggregateZero::get(type);
     } else {
         type = get_llvm_type(p->i_type);
-        init = ConstantInt::get(get_llvm_type(T_INT), 0);
+        if ((p->i_type & ~(T_ARRAY|T_ADDR)) == T_INT) {
+            init = ConstantInt::get(get_llvm_type(T_INT), 0);
+        } else {
+            init = ConstantFP::get(get_llvm_type(T_DOUBLE), 0.0);
+        }
     }
 
     TheModule->getOrInsertGlobal(name, type);
@@ -517,10 +523,16 @@ void docontinue() {
  */
 void dodo(void* m1, void* m2, struct sem_rec* cond, void* m3)
 {
-    fprintf(stderr, "sem: dodo not implemented\n");
-    return;
-}
+    backpatch(cond->s_true,  m1);
+    backpatch(cond->s_false, m3);
 
+    if (looptop) {
+        backpatch(looptop->conts, m2);
+        backpatch(looptop->breaks, m3);
+        looptop->conts  = nullptr;
+        looptop->breaks = nullptr;
+    }
+}
 /*
  * dofor - for statement
  *
@@ -536,9 +548,6 @@ void dofor(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n1, void* m
     if (cond) {
         backpatch(cond->s_true,  m3);
         backpatch(cond->s_false, m4);
-    } else {
-        // for(;;) – no condition means always-true; parser should already ensure flow to m3
-        // Nothing to backpatch here.
     }
 
     // From end of body, jump to increment (m2)
@@ -568,9 +577,18 @@ void dofor(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n1, void* m
  */
 void dogoto(char* id)
 {
-    fprintf(stderr, "sem: dogoto not implemented\n");
-    return;
+    // Create a temporary successor to satisfy IR constraints now.
+    BasicBlock* tmp = create_tmp_label();
+    BranchInst* br  = Builder.CreateBr(tmp);
+
+    if (numgotos >= MAXGOTOS) { yyerror("too many gotos"); return; }
+    gotos[numgotos++] = { slookup(id), br };
+
+    // Make subsequent straight-line code land in a fresh (unreachable) block.
+    BasicBlock* dead = create_named_label(new_label());
+    Builder.SetInsertPoint(dead);
 }
+
 
 /*
  * doif - one-arm if statement
@@ -598,8 +616,7 @@ void doif(struct sem_rec* cond, void* m1, void* m2) {
  * LLVM API calls:
  * None
  */
-void doifelse(struct sem_rec* cond, void* m1, struct sem_rec* n,
-              void* m2, void* m3)
+void doifelse(struct sem_rec* cond, void* m1, struct sem_rec* n, void* m2, void* m3)
 {
     // cond true  -> then block at m1
     // cond false -> else block at m2
@@ -609,7 +626,6 @@ void doifelse(struct sem_rec* cond, void* m1, struct sem_rec* n,
     backpatch(cond->s_false, m2);
     backpatch(n,             m3);
 }
-
 
 /*
  * doret - return statement
@@ -656,8 +672,7 @@ void doret(struct sem_rec* e) {
  * LLVM API calls:
  * None
  */
-void dowhile(void* m1, struct sem_rec* cond, void* m2,
-             struct sem_rec* n, void* m3)
+void dowhile(void* m1, struct sem_rec* cond, void* m2, struct sem_rec* n, void* m3)
 {
     // cond true → body (m2), cond false → after loop (m3)
     backpatch(cond->s_true,  m2);
@@ -905,8 +920,39 @@ struct sem_rec* indx(struct sem_rec* x, struct sem_rec* i)
  */
 void labeldcl(const char* id)
 {
-    fprintf(stderr, "sem: labeldcl not implemented\n");
-    return;
+    // If current block isn't terminated, branch to label block (we'll know it soon)
+    BasicBlock* curr = Builder.GetInsertBlock();
+
+    // Find or create the label BB entry
+    int idx = -1;
+    for (int i = 0; i < numlabelids; ++i) {
+        if (strcmp(labels[i].id, id) == 0) { idx = i; break; }
+    }
+    if (idx == -1) {
+        if (numlabelids >= MAXLABELS) { yyerror("too many labels"); return; }
+        labels[numlabelids].id = slookup(id);
+        labels[numlabelids].bb = create_named_label(labels[numlabelids].id);
+        idx = numlabelids++;
+    }
+    BasicBlock* L = labels[idx].bb;
+
+    // If current block has no terminator, branch into label
+    if (!curr->getTerminator()) {
+        Builder.CreateBr(L);
+    }
+
+    // Start emitting at the label block
+    Builder.SetInsertPoint(L);
+
+    // Patch all gotos targeting this label
+    for (int g = 0; g < numgotos; ++g) {
+        if (gotos[g].id && strcmp(gotos[g].id, id) == 0 && gotos[g].branch) {
+            gotos[g].branch->setSuccessor(0, L);
+            // mark as resolved
+            gotos[g].id = nullptr;
+            gotos[g].branch = nullptr;
+        }
+    }
 }
 
 /*
@@ -1093,8 +1139,6 @@ struct sem_rec* rel(const char* op, struct sem_rec* x, struct sem_rec* y) {
     return make_cond(cmp);
 }
 
-
-
 /*
  * cast - cast value to a different type
  *
@@ -1177,8 +1221,6 @@ struct sem_rec* assign(const char* op, struct sem_rec* x, struct sem_rec* y)
     Builder.CreateStore(store_val, lhs_ptr);
     return s_node((void*)store_val, lhs_t);
 }
-
-
 
 /*
  * genstring - generate code for a string

@@ -1,6 +1,11 @@
 	.text
 	.file	"<stdin>"
-	.globl	main                            # -- Begin function main
+	.section	.rodata.cst8,"aM",@progbits,8
+	.p2align	3, 0x0                          # -- Begin function main
+.LCPI0_0:
+	.quad	0x403e000000000000              # double 30
+	.text
+	.globl	main
 	.p2align	4, 0x90
 	.type	main,@function
 main:                                   # @main
@@ -8,46 +13,38 @@ main:                                   # @main
 # %bb.0:
 	pushq	%rax
 	.cfi_def_cfa_offset 16
-	movl	%esi, (%rsp)
-	movl	$0, 4(%rsp)
+	movl	$1, 4(%rsp)
+	movl	$8, (%rsp)
 	movq	m@GOTPCREL(%rip), %rax
+	movsd	.LCPI0_0(%rip), %xmm0           # xmm0 = [3.0E+1,0.0E+0]
 	jmp	.LBB0_1
 	.p2align	4, 0x90
-.LBB0_5:                                # %L6
+.LBB0_5:                                # %L1
                                         #   in Loop: Header=BB0_1 Depth=1
-	incl	4(%rsp)
-.LBB0_1:                                # %L0
-                                        # =>This Loop Header: Depth=1
-                                        #     Child Loop BB0_3 Depth 2
-	cmpl	$5, 4(%rsp)
-	jg	.LBB0_6
-# %bb.2:                                # %L1
-                                        #   in Loop: Header=BB0_1 Depth=1
-	movl	$5, (%rsp)
-	.p2align	4, 0x90
-.LBB0_3:                                # %L2
-                                        #   Parent Loop BB0_1 Depth=1
-                                        # =>  This Inner Loop Header: Depth=2
+	decl	(%rsp)
+.LBB0_1:                                # %userlbl_L1
+                                        # =>This Inner Loop Header: Depth=1
 	movslq	4(%rsp), %rcx
 	movl	(%rsp), %edx
 	imull	%ecx, %edx
-	xorps	%xmm0, %xmm0
-	cvtsi2sd	%edx, %xmm0
-	addsd	(%rax,%rcx,8), %xmm0
-	movsd	%xmm0, (%rax,%rcx,8)
-	imull	$-1431655765, %edx, %ecx        # imm = 0xAAAAAAAB
-	addl	$715827882, %ecx                # imm = 0x2AAAAAAA
-	cmpl	$1431655765, %ecx               # imm = 0x55555555
-	jb	.LBB0_5
-# %bb.4:                                # %L4
-                                        #   in Loop: Header=BB0_3 Depth=2
-	movl	(%rsp), %ecx
-	decl	%ecx
-	movl	%ecx, (%rsp)
-	testl	%ecx, %ecx
-	jg	.LBB0_3
-	jmp	.LBB0_5
-.LBB0_6:                                # %L7
+	xorps	%xmm1, %xmm1
+	cvtsi2sd	%edx, %xmm1
+	addsd	(%rax,%rcx,8), %xmm1
+	movsd	%xmm1, (%rax,%rcx,8)
+	ucomisd	%xmm0, %xmm1
+	jbe	.LBB0_5
+# %bb.2:                                # %L0
+                                        #   in Loop: Header=BB0_1 Depth=1
+	movl	4(%rsp), %ecx
+	incl	%ecx
+	movl	%ecx, 4(%rsp)
+	cmpl	$4, %ecx
+	jge	.LBB0_4
+# %bb.3:                                # %L2
+                                        #   in Loop: Header=BB0_1 Depth=1
+	movl	$8, (%rsp)
+	jmp	.LBB0_1
+.LBB0_4:                                # %L3
 	movsd	(%rax), %xmm0                   # xmm0 = mem[0],zero
 	movsd	8(%rax), %xmm1                  # xmm1 = mem[0],zero
 	movsd	16(%rax), %xmm2                 # xmm2 = mem[0],zero
