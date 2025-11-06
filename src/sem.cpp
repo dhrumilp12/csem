@@ -188,7 +188,7 @@ Type* get_llvm_type(int type)
 
 /*
  * HELPER UTILITY FUNCTIONS
- */
+*/
 
 static void prune_temp_blocks(llvm::Function* F) {
     std::vector<llvm::BasicBlock*> dead;
@@ -1258,18 +1258,9 @@ struct sem_rec* assign(const char* op, struct sem_rec* x, struct sem_rec* y)
  */
 struct sem_rec* genstring(char* s)
 {
-    // Convert source-escaped text -> raw bytes (strip quotes, handle \n, \t, etc.)
-    char* unescaped = parse_escape_chars(s);
-    if (!unescaped) {
-        yyerror("invalid string literal");
-        return nullptr;
-    }
 
     // Create a private global string and returns i8* pointer
-    llvm::Value* gptr = Builder.CreateGlobalStringPtr(unescaped);
-
-    // We no longer need the heap buffer
-    free(unescaped);
+    llvm::Value* gptr = Builder.CreateGlobalStringPtr(s);
 
     // Treat string literal as an rvalue "pointer-to-bytes" (not an lvalue)
     return s_node((void*)gptr, T_STR);
@@ -1308,3 +1299,4 @@ void emit_IR()
 {
     TheModule->print(outs(), nullptr);
 }
+
