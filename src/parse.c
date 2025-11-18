@@ -143,11 +143,11 @@ static void parse_dcl() {
     ty = csemType(lookahead.type);
     match(lookahead.type);
 
-    dcl(parse_dclr(), ty, ty);
+    dcl(parse_dclr(), ty, 0);
 
     while (lookahead.type == COMMA) {
         match(COMMA);
-        dcl(parse_dclr(), ty, ty);
+        dcl(parse_dclr(), ty, 0);
     }
 }
 
@@ -397,10 +397,10 @@ void extern_func() {
         match(lookahead.type);
 
         if (peek_token().type != LPAREN) {
-            dcl(parse_dclr(), ty, ty);
+            dcl(parse_dclr(), ty, 0);
             while (lookahead.type == COMMA) {
                 match(COMMA);
-                dcl(parse_dclr(), ty, ty);
+                dcl(parse_dclr(), ty, 0);
             }
             match(SEMICOLON);
             return;
@@ -443,7 +443,7 @@ enum ExprType {
     ETYPE_COND,
 };
 
-#define BINARY_PRECEDENCE_LIST                                               \
+#define BINARY_PRECEDENCE_LIST                                          \
     X(ASSIGN_OR, "|=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)   \
     X(ASSIGN_XOR, "^=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)  \
     X(ASSIGN_AND, "&=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)  \
@@ -454,22 +454,22 @@ enum ExprType {
     X(ASSIGN_MUL, "*=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)  \
     X(ASSIGN_DIV, "/=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)  \
     X(ASSIGN_MOD, "%=", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)  \
-    X(ASSIGN, "", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)        \
-    X(ADD, "+", 12, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)            \
-    X(SUB, "-", 12, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)            \
-    X(MUL, "*", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)            \
-    X(DIV, "/", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)            \
-    X(MOD, "%", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)            \
-    X(BIT_XOR, "^", 7, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)         \
-    X(BIT_AND, "&", 8, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)         \
-    X(BIT_OR, "|", 6, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)          \
-    X(LT, "<", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)             \
-    X(LE, "<=", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)            \
-    X(GT, ">", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)             \
-    X(GE, ">=", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)            \
-    X(AND, "", 5, 'L', rel, ETYPE_COND, ETYPE_COND, ETYPE_COND)              \
-    X(OR, "", 4, 'L', rel, ETYPE_COND, ETYPE_COND, ETYPE_COND)               \
-    X(EQ, "=", 9, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)              \
+    X(ASSIGN, "", 2, 'R', assign, ETYPE_LVAL, ETYPE_EXPR, ETYPE_EXPR)       \
+    X(ADD, "+", 12, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)     \
+    X(SUB, "-", 12, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)     \
+    X(MUL, "*", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)     \
+    X(DIV, "/", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)     \
+    X(MOD, "%", 13, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)     \
+    X(BIT_XOR, "^", 7, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)  \
+    X(BIT_AND, "&", 8, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)  \
+    X(BIT_OR, "|", 6, 'L', op2, ETYPE_EXPR, ETYPE_EXPR, ETYPE_EXPR)   \
+    X(LT, "<", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)      \
+    X(LE, "<=", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)     \
+    X(GT, ">", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)      \
+    X(GE, ">=", 10, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)     \
+    X(AND, "", 5, 'L', rel, ETYPE_COND, ETYPE_COND, ETYPE_COND)       \
+    X(OR, "", 4, 'L', rel, ETYPE_COND, ETYPE_COND, ETYPE_COND)        \
+    X(EQ, "=", 9, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)       \
     X(NE, "!", 9, 'L', rel, ETYPE_EXPR, ETYPE_EXPR, ETYPE_COND)
 
 struct op_info {
@@ -613,7 +613,7 @@ static struct expression enforce_expr_type(struct expression ex, enum ExprType t
 
     } else if (ty == ETYPE_COND) {
         if (ex.type == ETYPE_LVAL) {
-            ex.val = op1("@", ex.val);
+            ex.val = ccexpr(op1("@", ex.val));
         } else if (ex.type == ETYPE_EXPR) {
             ex.val = ccexpr(ex.val);
         }
